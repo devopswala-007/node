@@ -1,0 +1,84 @@
+---
+# ─── TaskFlow App Service ─────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: taskflow-service
+  namespace: taskflow
+  labels:
+    app: taskflow
+spec:
+  type: ClusterIP           # Internal only; expose via Ingress below
+  selector:
+    app: taskflow
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80              # Service port (internal cluster traffic)
+      targetPort: 3000      # Container port
+
+---
+# ─── Ingress ─────────────────────────────────────────────────────────────────
+# Requires an Ingress controller (e.g., nginx-ingress)
+# Install: helm install ingress-nginx ingress-nginx/ingress-nginx
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: taskflow-ingress
+  namespace: taskflow
+  labels:
+    app: taskflow
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"  # Set true with TLS cert
+    # Uncomment for TLS with cert-manager:
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: taskflow.yourdomain.com   # ⚠️  Replace with your domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: taskflow-service
+                port:
+                  number: 80
+  # Uncomment to enable TLS:
+  # tls:
+  #   - hosts:
+  #       - taskflow.yourdomain.com
+  #     secretName: taskflow-tls-cert
+
+---
+# ─── HorizontalPodAutoscaler ──────────────────────────────────────────────────
+# Requires metrics-server installed in the cluster
+# kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: taskflow-hpa
+  namespace: taskflow
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: taskflow-app
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80

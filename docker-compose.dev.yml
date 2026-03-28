@@ -1,0 +1,19 @@
+version: '3.9'
+
+# Development override — run with:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+  app:
+    build:
+      target: builder      # Use builder stage (includes devDependencies)
+    command: npm run dev   # nodemon hot-reload
+    environment:
+      NODE_ENV: development
+      LOG_LEVEL: debug
+    volumes:
+      - ./src:/app/src:ro  # Mount source for live reload
+      - ./logs:/app/logs
+    ports:
+      - "3000:3000"
+      - "9229:9229"        # Node.js debugger port

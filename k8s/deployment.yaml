@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskflow-app
+  namespace: taskflow
+  labels:
+    app: taskflow
+    version: "1.0.0"
+  annotations:
+    # Triggers rolling restart when ConfigMap changes (with Reloader or manually)
+    configmap-hash: "change-this-when-configmap-changes"
+spec:
+  replicas: 2                      # Run 2 pods for high availability
+  revisionHistoryLimit: 3          # Keep last 3 ReplicaSets for rollback
+  selector:
+    matchLabels:
+      app: taskflow
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1                  # Allow 1 extra pod during update
+      maxUnavailable: 0            # Never go below desired replica count
+  template:
+    metadata:
+      labels:
+        app: taskflow
+        version: "1.0.0"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/health"
+    spec:
+      # Graceful termination: wait 30s for in-flight requests
+      terminationGracePeriodSeconds: 30
+
+      # Security: don't run as root
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+
+      containers:
+        - name: taskflow-app
+          image: your-dockerhub-username/taskflow-api:latest
+          # ⚠️  Replace with your actual image. Example:
+          #   image: ghcr.io/your-org/taskflow-api:1.0.0
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+
+          # ─── Environment from ConfigMap ──────────────────────────────────────
+          envFrom:
+            - configMapRef:
+                name: taskflow-config
+
+          # ─── Sensitive env from Secret ────────────────────────────────────────
+          env:
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: taskflow-secrets
+                  key: JWT_SECRET
+
+          # ─── Resource Limits ──────────────────────────────────────────────────
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+          # ─── Liveness Probe ───────────────────────────────────────────────────
+          # Restarts the pod if it stops responding
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+
+          # ─── Readiness Probe ──────────────────────────────────────────────────
+          # Removes pod from Service endpoints until it's ready to serve traffic
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+
+          # ─── Startup Probe ────────────────────────────────────────────────────
+          # Gives the app 60s to start before liveness kicks in
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            failureThreshold: 12
+            periodSeconds: 5
+
+          # ─── Volume Mounts ────────────────────────────────────────────────────
+          volumeMounts:
+            - name: logs
+              mountPath: /app/logs
+
+      volumes:
+        - name: logs
+          emptyDir: {}            # Logs are ephemeral; use a logging sidecar or DaemonSet in prod
+
+      # Spread pods across nodes for high availability
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - taskflow
+                topologyKey: kubernetes.io/hostname

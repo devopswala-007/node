@@ -1,0 +1,112 @@
+stages:
+  - lint
+  - test
+  - build
+  - deploy
+
+variables:
+  IMAGE_NAME: $CI_REGISTRY_IMAGE/taskflow-api
+  NODE_VERSION: "20"
+  DOCKER_DRIVER: overlay2
+  DOCKER_BUILDKIT: "1"
+
+# ─── Cache node_modules across jobs ───────────────────────────────────────────
+.node-cache: &node-cache
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules/
+    policy: pull-push
+
+# ─── Stage: Lint ──────────────────────────────────────────────────────────────
+lint:
+  stage: lint
+  image: node:${NODE_VERSION}-alpine
+  <<: *node-cache
+  before_script:
+    - npm ci
+  script:
+    - npm run lint
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ─── Stage: Test ──────────────────────────────────────────────────────────────
+test:
+  stage: test
+  image: node:${NODE_VERSION}-alpine
+  <<: *node-cache
+  before_script:
+    - npm ci
+  script:
+    - npm test
+  variables:
+    NODE_ENV: test
+    JWT_SECRET: gitlab-ci-test-secret
+    RATE_LIMIT_MAX_REQUESTS: "1000"
+  coverage: '/Lines\s*:\s*(\d+(?:\.\d+)?)%/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage/cobertura-coverage.xml
+      junit: coverage/junit.xml
+    paths:
+      - coverage/
+    expire_in: 1 week
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ─── Stage: Security Audit ────────────────────────────────────────────────────
+security-audit:
+  stage: test
+  image: node:${NODE_VERSION}-alpine
+  before_script:
+    - npm ci
+  script:
+    - npm audit --audit-level=high
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ─── Stage: Build Docker Image ────────────────────────────────────────────────
+build-image:
+  stage: build
+  image: docker:24
+  services:
+    - docker:24-dind
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - |
+      docker build \
+        --target production \
+        --cache-from $IMAGE_NAME:latest \
+        --build-arg BUILDKIT_INLINE_CACHE=1 \
+        -t $IMAGE_NAME:$CI_COMMIT_SHA \
+        -t $IMAGE_NAME:latest \
+        .
+    - docker push $IMAGE_NAME:$CI_COMMIT_SHA
+    - docker push $IMAGE_NAME:latest
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# ─── Stage: Deploy to Staging ─────────────────────────────────────────────────
+deploy-staging:
+  stage: deploy
+  image: bitnami/kubectl:latest
+  environment:
+    name: staging
+    url: https://staging.taskflow.yourdomain.com
+  before_script:
+    - echo "$KUBE_CONFIG" | base64 -d > ~/.kube/config
+  script:
+    - kubectl set image deployment/taskflow-app taskflow-app=$IMAGE_NAME:$CI_COMMIT_SHA -n taskflow
+    - kubectl rollout status deployment/taskflow-app -n taskflow --timeout=120s
+    - kubectl get pods -n taskflow
+  when: manual   # Require manual approval to deploy
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
